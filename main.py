@@ -4,13 +4,11 @@ import os, json, asyncio, traceback
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from contextlib import AsyncExitStack
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import json
-from utils.browser_agent import browser_create_agent, load_browser_tools, execute_tool_call, process_agent_query
+from utils.browser_agent import browser_create_agent, process_agent_query, initialize_browser_session
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -59,62 +57,21 @@ async def main():
         if not os.path.exists(images_dir):
             os.makedirs(images_dir)
 
-        # RUN IN NPX MODE     
-        command = "npx"
-        args = ["@playwright/mcp@latest", "--output-dir=/images"]
+        session, agent_tools_description = await initialize_browser_session(exit_stack, images_dir)
+        agent_chain = await browser_create_agent(session)
 
-
-        # RUN BELOW ARGS WHENRUNNING IN SERVER (eg: WSL) IN HEADLESS MODE IN DOCKER
-        # command = "docker"
-        # args = [
-        #     "run",
-        #     "-i",
-        #     "--rm",
-        #     "--init",
-        #     "--pull=always",
-        #     "-v",
-        #     f"{images_dir}:/images",
-        #     "mcr.microsoft.com/playwright/mcp",
-        #     "--no-sandbox",
-        #     "--output-dir=/images",
-        #     "--viewport-size=1920,1080"
-        #  ]
-
-        server_params = StdioServerParameters(
-            command=command,
-            args=args,
-            env=None
-        )
-
-        stdio_transport = await exit_stack.enter_async_context(stdio_client(server_params))
-        stdio, client = stdio_transport
-        session = await exit_stack.enter_async_context(ClientSession(stdio, client))
-        await session.initialize()
-
-        response = await session.list_tools()
-        agent_tools = response.tools
-        # logger.info("Available Playwright MCP Tools:")
-        # for tool in agent_tools:
-        #     logger.info(f"- {tool.name}: {tool.description or 'No description available'}")
-        
-        tools = load_browser_tools()
-        if not tools:
-            logger.warning("No browser tools loaded, proceeding with empty toolset")
-        
-        # Format tools for inclusion in the prompt
-        tools_description = ""
-        for tool in tools:
-            tools_description += (
-                f"Tool: {tool['name']}\n"
-                f"Description: {tool['description']}\n"
-                f"Input Schema: {json.dumps(tool['inputSchema'], indent=2)}\n\n"
-            )
-
-        agent_tools_description = tools_description
-
-        agent_chain = await browser_create_agent(agent_tools)
-        await process_agent_query(session, agent_chain, agent_tools_description)
-        
+        tool_result = None 
+        last_tool_call = None
+        step = 0
+        while True:
+            try:
+                input_query = input("INPUT: ")
+                await process_agent_query(input_query, tool_result, last_tool_call, step, agent_chain, agent_tools_description, session)
+                
+            except Exception as e:
+                logger.error(f"Error in agent loop: {e}")
+                logger.debug(f"Traceback: {traceback.format_exc()}")
+                await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())

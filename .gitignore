@@ -8,3 +8,5 @@ uvx
 env
 env.fish
 *logs
+*/__pycache__
+*utils/__pycache__

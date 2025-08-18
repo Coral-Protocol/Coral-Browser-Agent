@@ -5,6 +5,8 @@ from pydantic import BaseModel, ValidationError
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 
 # Custom JSON formatter
@@ -150,72 +152,116 @@ async def browser_create_agent(agent_tools):
     chain = prompt | model
     return chain
 
-async def process_agent_query(session, agent_chain, agent_tools_description):
-    tool_result = None 
-    last_tool_call = None
-    step = 0
-    while True:
-        try:
-            input_query = input("INPUT: ")
-            logger.info(f"STEP {step}: Starting new agent invocation for query: {input_query}")
-            step += 1
-            intermediate_steps = []
-            # tool_result = None
-            done = False
-            while not done:
-                scratchpad_str = "\n".join([
-                    f"Step {i+1}: Tool call: {json.dumps(step[0])}\nResult: {step[1]}" 
-                    for i, step in enumerate(intermediate_steps[-2:])  # Keep last 2 steps
-                ]) if intermediate_steps else "No previous steps."
+async def initialize_browser_session(exit_stack, images_dir):
+    command = "npx"
+    args = ["@playwright/mcp@latest", "--output-dir=/images"]
 
-                # Invoke the chain
-                result = await agent_chain.ainvoke({
-                    "input_query": input_query,
-                    "agent_tools_description": agent_tools_description,
-                    "tool_result": json.dumps(tool_result) if tool_result else "",
-                    "agent_scratchpad": scratchpad_str
-                })
-                output = result.content
-                if output:
+    # RUN BELOW ARGS WHEN RUNNING IN SERVER (eg: WSL) IN HEADLESS MODE IN DOCKER
+    # command = "docker"
+    # args = [
+    #     "run",
+    #     "-i",
+    #     "--rm",
+    #     "--init",
+    #     "--pull=always",
+    #     "-v",
+    #     f"{images_dir}:/images",
+    #     "mcr.microsoft.com/playwright/mcp",
+    #     "--no-sandbox",
+    #     "--output-dir=/images",
+    #     "--viewport-size=1920,1080"
+    # ]
+
+    server_params = StdioServerParameters(
+        command=command,
+        args=args,
+        env=None
+    )
+
+    stdio_transport = await exit_stack.enter_async_context(stdio_client(server_params))
+    stdio, client = stdio_transport
+    session = await exit_stack.enter_async_context(ClientSession(stdio, client))
+    await session.initialize()
+
+    response = await session.list_tools()
+    agent_tools = response.tools
+    # logger.info("Available Playwright MCP Tools:")
+    # for tool in agent_tools:
+    #     logger.info(f"- {tool.name}: {tool.description or 'No description available'}")
+    
+    tools = load_browser_tools()
+    if not tools:
+        logger.warning("No browser tools loaded, proceeding with empty toolset")
+    
+    # Format tools for inclusion in the prompt
+    tools_description = ""
+    for tool in tools:
+        tools_description += (
+            f"Tool: {tool['name']}\n"
+            f"Description: {tool['description']}\n"
+            f"Input Schema: {json.dumps(tool['inputSchema'], indent=2)}\n\n"
+        )
+
+    agent_tools_description = tools_description
+    return session, agent_tools_description
+
+
+async def process_agent_query(input_query, tool_result, last_tool_call, step, agent_chain, agent_tools_description, session):
+    logger.info(f"STEP {step}: Starting new agent invocation for query: {input_query}")
+    step += 1
+    intermediate_steps = []
+    # tool_result = None
+    done = False
+    while not done:
+        scratchpad_str = "\n".join([
+            f"Step {i+1}: Tool call: {json.dumps(step[0])}\nResult: {step[1]}" 
+            for i, step in enumerate(intermediate_steps[-2:])  # Keep last 2 steps
+        ]) if intermediate_steps else "No previous steps."
+
+        # Invoke the chain
+        result = await agent_chain.ainvoke({
+            "input_query": input_query,
+            "agent_tools_description": agent_tools_description,
+            "tool_result": json.dumps(tool_result) if tool_result else "",
+            "agent_scratchpad": scratchpad_str
+        })
+        output = result.content
+        if output:
+            try:
+                parsed = json.loads(output)
+                if "final_answer" in parsed:
+                    logger.info(f"Final answer: {parsed['final_answer']}")
+                    done = True
+                    last_tool_call = None  # Reset on completion
+                elif "tool_name" in parsed:
+                    tool_call_json = output
+                    # Check if the tool call is the same as the last one
+                    if tool_call_json == last_tool_call:
+                        logger.warning(f"Skipping redundant tool call: {tool_call_json}")
+                        done = True  # Skip to avoid infinite loop
+                        continue
                     try:
-                        parsed = json.loads(output)
-                        if "final_answer" in parsed:
-                            logger.info(f"Final answer: {parsed['final_answer']}")
-                            done = True
-                            last_tool_call = None  # Reset on completion
-                        elif "tool_name" in parsed:
-                            tool_call_json = output
-                            # Check if the tool call is the same as the last one
-                            if tool_call_json == last_tool_call:
-                                logger.warning(f"Skipping redundant tool call: {tool_call_json}")
-                                done = True  # Skip to avoid infinite loop
-                                continue
-                            try:
-                                json.loads(tool_call_json)  # Validate JSON
-                                print(f"Executing tool call: {tool_call_json}")
-                                logger.info(f"Executing tool call: {tool_call_json}")
-                                tool_result = await execute_tool_call(session, tool_call_json)
-                                # print(tool_result)
-                                # logger.info(f"Tool execution result: {json.dumps(tool_result)}")
-                                last_tool_call = tool_call_json  # Update last tool call
-                                intermediate_steps.append((parsed, json.dumps(tool_result)))
-                            except json.JSONDecodeError:
-                                logger.error(f"Invalid tool call JSON: {tool_call_json}")
-                                tool_result = {"status": "error", "message": "Invalid JSON from agent"}
-                                done = True
-                        else:
-                            logger.error("Invalid output format")
-                            done = True
+                        json.loads(tool_call_json)  # Validate JSON
+                        print(f"Executing tool call: {tool_call_json}")
+                        logger.info(f"Executing tool call: {tool_call_json}")
+                        tool_result = await execute_tool_call(session, tool_call_json)
+                        # print(tool_result)
+                        # logger.info(f"Tool execution result: {json.dumps(tool_result)}")
+                        last_tool_call = tool_call_json  # Update last tool call
+                        intermediate_steps.append((parsed, json.dumps(tool_result)))
                     except json.JSONDecodeError:
-                        logger.error(f"Invalid JSON format in agent output: {output}")
+                        logger.error(f"Invalid tool call JSON: {tool_call_json}")
                         tool_result = {"status": "error", "message": "Invalid JSON from agent"}
                         done = True
                 else:
-                    logger.error("No output from agent")
+                    logger.error("Invalid output format")
                     done = True
-            logger.info("Completed agent invocation, restarting loop")
-            await asyncio.sleep(1)
-        except Exception as e:
-            logger.error(f"Error in agent loop: {e}")
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            await asyncio.sleep(5)
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON format in agent output: {output}")
+                tool_result = {"status": "error", "message": "Invalid JSON from agent"}
+                done = True
+        else:
+            logger.error("No output from agent")
+            done = True
+    logger.info("Completed agent invocation, restarting loop")
+    await asyncio.sleep(1)
