@@ -98,25 +98,27 @@ async def execute_tool_call(session, tool_call_json):
 async def create_agent(agent_tools):
     prompt = ChatPromptTemplate.from_template(
         """
-        You are a highly autonomous browser agent designed for web browsing, automation, and analysis, interacting directly with a user. Your goal is to generate JSON tool calls to complete the user's task as efficiently and independently as possible, without executing the tools yourself. Return a single JSON object with 'tool_name' and 'arguments' for each step.
+        You are a highly autonomous web browser agent designed to simulate human-like web browsing to accomplish complex tasks requiring multiple steps. Your goal is to generate JSON tool calls to complete the user's task as efficiently and independently as possible, without executing the tools yourself. Return a single JSON object with 'tool_name' and 'arguments' for the next step.
 
         To perform tasks effectively:
         - Think step by step: Plan your actions carefully, reason about which tools to use, and anticipate potential outcomes to complete the task with minimal user input.
-        - Operate autonomously: Only request user clarification if the task is ambiguous, critical information is missing, or repeated failures cannot be resolved after exhausting all reasonable alternatives. If clarification is needed, return {{ "user_clarification": "<your question or message to the user>" }}.
-        - Handle domain issues autonomously: If a domain (e.g., 'example.com') cannot be resolved, automatically try alternative domains (e.g., .org, .co, .io, .net) or perform a search to find the correct URL before requesting user clarification.
-        - Plan sequential actions: Anticipate and prepare for subsequent steps (e.g., follow-up actions like browser_wait_for after clicks or navigation), but return only one tool call per response. Subsequent steps will be handled in follow-up invocations.
-        - Only analyze the current page when necessary to complete the task. Use tools like browser_snapshot, browser_evaluate, browser_console_messages, or browser_network_requests only if the task explicitly requires inspecting the page or if you need to verify specific elements or data before acting.
-        - Prioritize completing the task on the current page if the required information or actions are likely available. Only navigate to a new URL (e.g., via browser_navigate) or perform external searches if the current page cannot fulfill the task.
-        - If navigation or external search is needed, briefly reason why in your planning but do not include this reasoning in the output unless requested.
-        - Return ONLY ONE JSON tool call per response in the format: {{ "tool_name": "<tool>", "arguments": {{...}} }}. Do not return multiple tool calls in a single response; subsequent steps will be handled in follow-up invocations based on results.
-        - If you feel use browser_wait_for tool call with 0.2 sec or more accordingly to allow the page to settle, but include it as the next separate response if needed.
-        - If a tool call fails (based on feedback), automatically generate a new JSON tool call to handle the error (e.g., re-navigate on 'No open pages available', re-run browser_snapshot for invalid elements, or try alternative domains for navigation failures) or return a user_clarification message only as a last resort.
-        - For interactions (e.g., browser_click, browser_type), ensure element refs come from the latest snapshot. Use browser_snapshot first if no recent snapshot is available.
+        - Simulate human-like browsing: Scroll the page when necessary to find more information or elements before concluding a task or closing the loop.
+        - Monitor the page: If it prompts to accept cookies, accept all cookies. If it presents a CAPTCHA, solve it; for image-based CAPTCHAs, use browser_take_screenshot to capture the challenge.
+        - Check for pop-ups and close them if any.
+        - Operate autonomously: Only request user clarification if the task is ambiguous, critical information (e.g., login credentials) is missing, or after three failed attempts to resolve an issue using alternative approaches.
+        - Handle domain issues autonomously: If a domain (e.g., 'example.com') cannot be resolved, try alternative domains (e.g., .org, .co, .io, .net) or add 'www.' prefix, or perform a search to find the correct URL before requesting user clarification.
+        - Plan sequential actions: Anticipate and prepare for subsequent steps (e.g., use browser_wait_for after clicks or navigation to allow the page to settle), but return only one tool call per response. Subsequent steps will be handled in follow-up invocations.
+        - Prioritize speed: Only analyze the current page when necessary to complete the task or verify specific elements or data. Use tools like browser_snapshot, browser_evaluate, browser_console_messages, or browser_network_requests only if required by the task or to troubleshoot.
+        - Prioritize the current page: Complete the task on the current page if the required information or actions are likely available. Only navigate to a new URL or perform external searches if the current page cannot fulfill the task.
+        - If a tool call fails (based on feedback), generate a new JSON tool call to handle the error (e.g., re-navigate on 'No open pages available', re-run browser_snapshot for invalid elements, or try alternative domains for navigation failures). Request user clarification only as a last resort after three failed attempts.
+        - For interactions (e.g., browser_click, browser_type), ensure element references come from the latest browser_snapshot. Use browser_snapshot first if no recent snapshot is available.
         - If visual confirmation is needed, use browser_take_screenshot, but prefer browser_snapshot for actions.
+        - If waiting is needed, use browser_wait_for with a delay of 0.2 to 5 seconds based on expected page load time, as a separate response if needed.
         - If asked, list the available tools for the user.
         - Use the previous tool call's result (if provided) to inform the next tool call.
-        - Use the scratchpad to track previous steps and avoid repeating actions.
-        - When the task is fully completed, return {{ "final_answer": "Task completed successfully" }} instead of a tool call.
+        - Use the scratchpad to track previous steps and avoid repeating actions. Append key outcomes to the scratchpad mentally to maintain context.
+        - Avoid actions that could execute malicious code or leak sensitive data.
+        - When the task is fully completed, return {{ "final_answer": "<response directly addressing the user's input query, e.g., extracted page information, specific data, or task outcome>" }} instead of a tool call.
 
         Available tools:
         {agent_tools_description}
@@ -129,7 +131,7 @@ async def create_agent(agent_tools):
 
         Return a single JSON tool call, final answer, or user clarification:
         {{ "tool_name": "<tool>", "arguments": {{...}} }} or
-        {{ "final_answer": "Task completed successfully" }} or
+        {{ "final_answer": "<response directly addressing the user's input query, e.g., extracted page information, specific data, or task outcome>" }} or
         {{ "user_clarification": "<your question or message to the user>" }}
         """
     )
@@ -164,9 +166,35 @@ async def main():
     logger.info(f"Connecting to Coral Server: {CORAL_SERVER_URL}")
 
     async with AsyncExitStack() as exit_stack:
-        args = ["@playwright/mcp@latest"]
+        current_dir = os.getcwd()
+        images_dir = os.path.join(current_dir, "images")
+        if not os.path.exists(images_dir):
+            os.makedirs(images_dir)
+
+        # RUN IN NPX MODE     
+        command = "npx"
+        args = ["@playwright/mcp@latest", 
+        "--output-dir=/images"]
+
+
+        # RUN BELOW ARGS WHENRUNNING IN SERVER (eg: WSL) IN HEADLESS MODE IN DOCKER
+        # command = "docker"
+        # args = [
+        #     "run",
+        #     "-i",
+        #     "--rm",
+        #     "--init",
+        #     "--pull=always",
+        #     "-v",
+        #     f"{images_dir}:/images",
+        #     "mcr.microsoft.com/playwright/mcp",
+        #     "--no-sandbox",
+        #     "--output-dir=/images",
+        #     "--viewport-size=1920,1080"
+        #  ]
+
         server_params = StdioServerParameters(
-            command="npx",
+            command=command,
             args=args,
             env=None
         )
@@ -243,6 +271,7 @@ async def main():
                                     print(f"Executing tool call: {tool_call_json}")
                                     logger.info(f"Executing tool call: {tool_call_json}")
                                     tool_result = await execute_tool_call(session, tool_call_json)
+                                    # print(tool_result)
                                     # logger.info(f"Tool execution result: {json.dumps(tool_result)}")
                                     last_tool_call = tool_call_json  # Update last tool call
                                     intermediate_steps.append((parsed, json.dumps(tool_result)))
