@@ -113,10 +113,12 @@ async def create_agent(agent_tools):
         - If a tool call fails (based on feedback), generate a new JSON tool call to handle the error (e.g., re-navigate on 'No open pages available', re-run browser_snapshot for invalid elements, or try alternative domains for navigation failures). Request user clarification only as a last resort after three failed attempts.
         - For interactions (e.g., browser_click, browser_type), ensure element references come from the latest browser_snapshot. Use browser_snapshot first if no recent snapshot is available.
         - If visual confirmation is needed, use browser_take_screenshot, but prefer browser_snapshot for actions.
-        - If waiting is needed, use browser_wait_for with a delay of 0.2 to 5 seconds based on expected page load time, as a separate response if needed.
+        - If waiting is needed (try to avoid), use browser_wait_for with a delay of 0.2 to 5 seconds based on expected page load time, as a separate response if needed.
         - If asked, list the available tools for the user.
         - Use the previous tool call's result (if provided) to inform the next tool call.
         - Use the scratchpad to track previous steps and avoid repeating actions. Append key outcomes to the scratchpad mentally to maintain context.
+        - Avoid repeating the same action consecutively, especially clicks on the same element. Once an element has been clicked and the action is confirmed (e.g., via a subsequent snapshot showing page change or expected outcome), do not attempt to click it again unless the task explicitly requires repeated interactions. 
+        - If the page does not change as expected after a click, try alternative actions like scrolling, waiting, or navigating differently before retrying.
         - Avoid actions that could execute malicious code or leak sensitive data.
         - When the task is fully completed, return {{ "final_answer": "<response directly addressing the user's input query, e.g., extracted page information, specific data, or task outcome>" }} instead of a tool call.
 
@@ -144,6 +146,11 @@ async def create_agent(agent_tools):
         max_tokens=os.getenv("MODEL_MAX_TOKENS", "8000"),
         base_url=os.getenv("MODEL_BASE_URL", None)
     )
+    
+    
+    # combined_tools= []
+    # agent = create_tool_calling_agent(model, combined_tools, prompt)
+    # return AgentExecutor(agent=agent, tools=combined_tools, verbose=True, handle_parsing_errors=True)
     
     chain = prompt | model
     return chain
@@ -227,7 +234,7 @@ async def main():
 
         agent_chain = await create_agent(agent_tools)
         tool_result = None 
-        last_tool_call = None  # Track the last executed tool call
+        last_tool_call = None
         step = 0
         while True:
             try:
@@ -238,10 +245,9 @@ async def main():
                 # tool_result = None
                 done = False
                 while not done:
-                    # Format scratchpad as string
                     scratchpad_str = "\n".join([
                         f"Step {i+1}: Tool call: {json.dumps(step[0])}\nResult: {step[1]}" 
-                        for i, step in enumerate(intermediate_steps)
+                        for i, step in enumerate(intermediate_steps[-2:])  # Keep last 2 steps
                     ]) if intermediate_steps else "No previous steps."
 
                     # Invoke the chain
