@@ -9,18 +9,22 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-# Custom JSON formatter
 class JsonFormatter(logging.Formatter):
-    def format(self, record):
+    """
+    Custom formatter to output logs in JSON format.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "level": record.levelname,
             "message": record.getMessage(),
             "module": record.module,
-            "line": record.lineno
+            "line": record.lineno,
         }
         return json.dumps(log_entry)
 
+# Set up logging
 log_dir = os.path.join(os.getcwd(), "logs")
 os.makedirs(log_dir, exist_ok=True)
 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -28,17 +32,29 @@ log_file = os.path.join(log_dir, f"{timestamp}.log")
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-handler = RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
+handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5)
 handler.setFormatter(JsonFormatter())
 logger.addHandler(handler)
 
-
 # Pydantic model for tool call validation
 class ToolCall(BaseModel):
+    """
+    Pydantic model for validating tool call inputs.
+    """
     tool_name: str
     arguments: dict = {}
 
 async def execute_tool_call(session, tool_call_json):
+    """
+    Execute a tool call using the provided session after validating the input JSON.
+
+    Args:
+        session (ClientSession): The client session for tool execution.
+        tool_call_json (str): JSON string representing the tool call.
+
+    Returns:
+        Dict[str, Any]: Result of the tool execution or error details.
+    """
     try:
         # Parse and validate JSON input with Pydantic
         tool_call = ToolCall(**json.loads(tool_call_json))
@@ -75,12 +91,12 @@ async def execute_tool_call(session, tool_call_json):
 def load_browser_tools(file_path="browser_tools.json"):
     """
     Load browser tools from a JSON file.
-    
+
     Args:
         file_path (str): Path to the JSON file containing browser tools.
-    
+
     Returns:
-        list: List of tool dictionaries.
+        List[Dict[str, Any]]: List of tool dictionaries.
     """
     try:
         with open(file_path, 'r') as f:
@@ -93,6 +109,15 @@ def load_browser_tools(file_path="browser_tools.json"):
 
 
 async def browser_create_agent(agent_tools):
+    """
+    Create and configure a LangChain agent chain for browser automation.
+
+    Args:
+        agent_tools (str): Description of available tools.
+
+    Returns:
+        Runnable: The configured LangChain chain.
+    """
     prompt = ChatPromptTemplate.from_template(
         """
         You are a highly autonomous web browser agent designed to simulate human-like web browsing to accomplish complex tasks requiring multiple steps. Your goal is to generate JSON tool calls to complete the user's task as efficiently and independently as possible, without executing the tools yourself. Return a single JSON object with 'tool_name' and 'arguments' for the next step.
@@ -153,6 +178,16 @@ async def browser_create_agent(agent_tools):
     return chain
 
 async def initialize_browser_session(exit_stack, images_dir):
+    """
+    Initialize a browser session using Playwright MCP.
+
+    Args:
+        exit_stack (asyncio.ExitStack): Context manager for async resources.
+        images_dir (str): Directory for storing images.
+
+    Returns:
+        tuple[ClientSession, str]: The initialized session and tools description.
+    """
     command = "npx"
     args = ["@playwright/mcp@latest", "--output-dir=/images"]
 
@@ -207,6 +242,19 @@ async def initialize_browser_session(exit_stack, images_dir):
 
 
 async def process_agent_query(input_query, tool_result, last_tool_call, step, agent_chain, agent_tools_description, session):
+    """
+    Process an agent query in a loop until completion.
+
+    Args:
+        input_query (str): The user's input query.
+        tool_result (Optional[Dict[str, Any]]): Result from the previous tool call.
+        last_tool_call (Optional[str]): JSON of the last tool call to avoid redundancy.
+        step (int): Current step number for logging.
+        agent_chain (Any): The LangChain chain for agent invocations.
+        agent_tools_description (str): Description of available tools.
+        session (ClientSession): The browser session.
+    """
+
     logger.info(f"STEP {step}: Starting new agent invocation for query: {input_query}")
     step += 1
     intermediate_steps = []
