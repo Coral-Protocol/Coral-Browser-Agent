@@ -146,7 +146,8 @@ async def main():
                     await asyncio.sleep(SLEEP_INTERVAL) 
                     continue
 
-                input_query = "go to google"
+                input_query = content
+                logger.info(f"Content: {input_query}")
 
                 # Process the query with the web browser agent
                 browser_result = await process_agent_query(
@@ -159,10 +160,10 @@ async def main():
                     session
                 )
                 step += 1
-
+                logger.info(f"browser_result: {browser_result}")
                 answer = browser_result
                 logger.info(f"Final answer: {answer}")
-                
+                answer = "abcd"
                 await agent_tools['send_message'].ainvoke({
                     "threadId": thread_id,
                     "content": answer,

@@ -142,7 +142,7 @@ async def browser_create_agent(agent_tools):
         - Avoid repeating the same action consecutively, especially clicks on the same element. Once an element has been clicked and the action is confirmed (e.g., via a subsequent snapshot showing page change or expected outcome), do not attempt to click it again unless the task explicitly requires repeated interactions. 
         - If the page does not change as expected after a click, try alternative actions like scrolling, waiting, or navigating differently before retrying.
         - Avoid actions that could execute malicious code or leak sensitive data.
-        - When the task is fully completed, return {{ "final_answer": "<response directly addressing the user's input query, e.g., extracted page information, specific data, or task outcome>" }} instead of a tool call.
+        - When the task is fully completed, return {{ "message": "<response directly addressing the user's input query, e.g., extracted page information, specific data, or task outcome>" }} instead of a tool call.
 
         Available tools:
         {agent_tools_description}
@@ -155,7 +155,7 @@ async def browser_create_agent(agent_tools):
 
         Return a single JSON tool call, final answer, or user clarification:
         {{ "tool_name": "<tool>", "arguments": {{...}} }} or
-        {{ "final_answer": "<response directly addressing the user's input query, e.g., extracted page information, specific data, or task outcome>" }} or
+        {{ "message": "<response directly addressing the user's input query, e.g., extracted page information, specific data, or task outcome>" }} or
         {{ "user_clarification": "<your question or message to the user>" }}
         """
     )
@@ -253,13 +253,17 @@ async def process_agent_query(input_query, tool_result, last_tool_call, step, ag
         agent_chain (Any): The LangChain chain for agent invocations.
         agent_tools_description (str): Description of available tools.
         session (ClientSession): The browser session.
+
+    Returns:
+        Dict[str, Any]: The final result of the agent query, containing either the message or an error message.
     """
 
     logger.info(f"STEP {step}: Starting new agent invocation for query: {input_query}")
     step += 1
     intermediate_steps = []
-    # tool_result = None
     done = False
+    final_result = None
+
     while not done:
         scratchpad_str = "\n".join([
             f"Step {i+1}: Tool call: {json.dumps(step[0])}\nResult: {step[1]}" 
@@ -277,39 +281,45 @@ async def process_agent_query(input_query, tool_result, last_tool_call, step, ag
         if output:
             try:
                 parsed = json.loads(output)
-                if "final_answer" in parsed:
-                    logger.info(f"Final answer: {parsed['final_answer']}")
+                if "message" in parsed:
+                    logger.info(f"Message: {parsed['message']}")
                     done = True
+                    final_result = {"status": "success", "message": parsed['message']}
                     last_tool_call = None  # Reset on completion
                 elif "tool_name" in parsed:
                     tool_call_json = output
                     # Check if the tool call is the same as the last one
                     if tool_call_json == last_tool_call:
                         logger.warning(f"Skipping redundant tool call: {tool_call_json}")
-                        done = True  # Skip to avoid infinite loop
+                        done = True
+                        final_result = {"status": "error", "message": "Could not complete action, redundant tool call skipped"}
                         continue
                     try:
                         json.loads(tool_call_json)  # Validate JSON
                         print(f"Executing tool call: {tool_call_json}")
                         logger.info(f"Executing tool call: {tool_call_json}")
                         tool_result = await execute_tool_call(session, tool_call_json)
-                        # print(tool_result)
-                        # logger.info(f"Tool execution result: {json.dumps(tool_result)}")
                         last_tool_call = tool_call_json  # Update last tool call
                         intermediate_steps.append((parsed, json.dumps(tool_result)))
                     except json.JSONDecodeError:
-                        logger.error(f"Invalid tool call JSON: {tool_call_json}")
-                        tool_result = {"status": "error", "message": "Invalid JSON from agent"}
+                        logger.error(f"Could not complete action, invalid tool call JSON: {tool_call_json}")
+                        tool_result = {"status": "error", "message": "Could not complete action, invalid JSON from agent"}
                         done = True
+                        final_result = tool_result
                 else:
-                    logger.error("Invalid output format")
+                    logger.error("Could not complete action, invalid output format")
                     done = True
+                    final_result = {"status": "error", "message": "Could not complete action, invalid output format from agent"}
             except json.JSONDecodeError:
-                logger.error(f"Invalid JSON format in agent output: {output}")
-                tool_result = {"status": "error", "message": "Invalid JSON from agent"}
+                logger.error(f"Could not complete action, invalid JSON format in agent output: {output}")
+                tool_result = {"status": "error", "message": "Could not complete action, invalid JSON from agent"}
                 done = True
+                final_result = tool_result
         else:
-            logger.error("No output from agent")
+            logger.error("Could not complete action, no output from agent")
             done = True
+            final_result = {"status": "error", "message": "Could not complete action, no output from agent"}
+    
     logger.info("Completed agent invocation, restarting loop")
     await asyncio.sleep(1)
+    return final_result
