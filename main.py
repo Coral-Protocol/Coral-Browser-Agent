@@ -161,16 +161,14 @@ async def main():
                 )
                 step += 1
                 logger.info(f"browser_result: {browser_result}")
-                answer = browser_result
+                answer = str(browser_result)
                 logger.info(f"Final answer: {answer}")
-                answer = "abcd"
                 await agent_tools['send_message'].ainvoke({
                     "threadId": thread_id,
                     "content": answer,
                     "mentions": [sender_id]
                 })
                 logger.info(f"Sent response to thread_id={thread_id}, sender_id={sender_id}, content: {answer}")
-
                 await asyncio.sleep(SLEEP_INTERVAL)
 
 
