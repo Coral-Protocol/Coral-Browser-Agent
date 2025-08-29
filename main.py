@@ -138,8 +138,81 @@ class BrowserAgent:
             self.logger.error(f"Failed to create agent: {str(e)}")
             raise
 
+    async def collect_inputs(self, input_queue: asyncio.Queue, logger1=None, client1=None, agent_tools1=None):
+        """Collect inputs and add to queue, responding if agent is busy."""
+        while True:
+            try:
+                if MANUAL_INPUT:
+                    input_query, should_exit = get_user_input(self.logger)
+                    if should_exit:
+                        self.logger.info("Exiting via user input")
+                        return
+                    if not input_query:
+                        await asyncio.sleep(0.1)
+                        continue
+                    if self.is_busy:
+                        print("Bot: Agent is processing previous request and is busy")
+                    await input_queue.put((input_query, None, None))
+                else:
+                    result = await wait_for_mentions(logger1, client1, agent_tools1)
+                    if not result:
+                        await asyncio.sleep(0.1)
+                        continue
+                    thread_id, sender_id, input_query = result
+                    if not input_query:
+                        await asyncio.sleep(0.1)
+                        continue
+                    if self.is_busy:
+                        await process_and_respond(
+                            logger1,
+                            agent_tools1,
+                            "Agent is processing previous request and is busy",
+                            thread_id,
+                            sender_id
+                        )
+                    await input_queue.put((input_query, thread_id, sender_id))
+            except Exception as e:
+                self.logger.error(f"Error collecting input: {str(e)}")
+                print("Bot: Error collecting input. Please try again.")
+                await asyncio.sleep(0.5)
+
+    async def process_inputs(self, input_queue: asyncio.Queue, agent: AgentExecutor, logger1=None, agent_tools1=None):
+        """Process inputs from the queue one at a time."""
+        while True:
+            try:
+                input_query, thread_id, sender_id = await input_queue.get()
+                self.is_busy = True
+                history_str = self._format_history()
+                try:
+                    response = await agent.ainvoke(
+                        {
+                            "input_query": input_query,
+                            "history": history_str,
+                            "tools_description": self.tools_description,
+                            "agent_scratchpad": ""
+                        }
+                    )
+                    output = response.get("output", "No response generated")
+                except Exception as e:
+                    self.logger.error(f"Agent invocation failed: {str(e)}")
+                    output = f"Error: {str(e)}"
+
+                print("Bot:", output)
+                self.history.append((input_query, output))
+
+                if not MANUAL_INPUT and thread_id and sender_id:
+                    await process_and_respond(logger1, agent_tools1, output, thread_id, sender_id)
+
+                input_queue.task_done()
+                self.is_busy = False
+            except Exception as e:
+                self.logger.error(f"Error processing queued input: {str(e)}")
+                self.is_busy = False
+                input_queue.task_done()
+                await asyncio.sleep(0.5)
+
     async def run(self):
-        """Handle user input loop with persistent session and robust error handling."""
+        """Handle user input loop with persistent session and asynchronous input handling."""
         async with self.client.session("playwright") as session:
             try:
                 # Initialize tools and agent
@@ -150,63 +223,26 @@ class BrowserAgent:
 
                 agent = await self.create_agent(agent_tools)
 
-                # Initialize coral agent for receiving messages from coral server
+                # Initialize external agent for non-manual input if needed
                 logger1, client1, agent_tools1 = None, None, None
                 if not MANUAL_INPUT:
                     logger1, client1, agent_tools1 = await initialize_agent()
 
-                while True:
-                    try:
-                        await asyncio.sleep(0.5)
-                        input_query = None
-                        thread_id, sender_id = None, None
+                # Initialize queue and busy state
+                input_queue = asyncio.Queue()
+                self.is_busy = False
 
-                        # Handle input based on MANUAL_INPUT flag
-                        if MANUAL_INPUT:
-                            input_query, should_exit = get_user_input(self.logger)
-                            if should_exit:
-                                self.logger.info("Exiting via user input")
-                                break
-                            if not input_query:
-                                continue
-                        else:
-                            result = await wait_for_mentions(logger1, client1, agent_tools1)
-                            if not result:
-                                continue
-                            thread_id, sender_id, input_query = result
-                            if not input_query:
-                                continue
-
-                        # Call the browser agent
-                        history_str = self._format_history()
-                        try:
-                            response = await agent.ainvoke(
-                                {
-                                    "input_query": input_query,
-                                    "history": history_str,
-                                    "tools_description": self.tools_description,
-                                    "agent_scratchpad": ""
-                                }
-                            )
-                            output = response.get("output", "No response generated")
-                        except Exception as e:
-                            self.logger.error(f"Agent invocation failed: {str(e)}")
-                            output = f"Error: {str(e)}"
-
-                        print("Bot:", output)
-                        self.history.append((input_query, output))
-
-                        # If not manual, process and respond to mentions
-                        if not MANUAL_INPUT and thread_id and sender_id:
-                            await process_and_respond(logger1, agent_tools1, output, thread_id, sender_id)
-
-                    except KeyboardInterrupt:
-                        self.logger.info("Exiting via KeyboardInterrupt")
-                        break
-                    except Exception as e:
-                        self.logger.error(f"Error processing input: {str(e)}")
-                        print("Bot: An error occurred. Please try again.")
-                        await asyncio.sleep(0.5)
+                # Run input collection and processing concurrently
+                try:
+                    await asyncio.gather(
+                        self.collect_inputs(input_queue, logger1, client1, agent_tools1),
+                        self.process_inputs(input_queue, agent, logger1, agent_tools1),
+                        return_exceptions=True
+                    )
+                except asyncio.CancelledError:
+                    self.logger.info("Tasks cancelled")
+                except KeyboardInterrupt:
+                    self.logger.info("Exiting via KeyboardInterrupt")
 
             except Exception as e:
                 self.logger.error(f"Session error: {str(e)}")
