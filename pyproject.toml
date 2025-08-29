@@ -9,5 +9,9 @@ dependencies = [
     "langchain-groq==0.3.4",
     "langchain-mcp-adapters==0.1.7",
     "langchain-openai==0.3.26",
+    "langgraph>=0.6.6",
+    "langgraph-checkpoint-sqlite>=2.0.11",
+    "pydantic-ai>=0.8.0",
+    "pydantic-ai-slim[mcp]>=0.8.0",
     "uv>=0.7.17",
 ]
